@@ -126,14 +126,12 @@ let time = 0;
 
 // ─── QUIZ STATE ───────────────────────────────────────────────────
 let quizQueue = [], quizIndex = 0, quizAnswered = false;
-let score = 0;
 let quizShowCorrect = false, quizCorrectTimer = 0, quizCompleted = false;
 let quizAnim = 0;
 let touchFrameCount = 0;
 const TOUCH_FRAMES_NEEDED = 3;
 
 function initQuiz() {
-  score = 0;
   quizQueue = Array.from({length:10},(_,i)=>i);
   for (let i=quizQueue.length-1;i>0;i--) {
     const j=Math.floor(Math.random()*(i+1));
@@ -156,34 +154,26 @@ function initQuiz() {
 // flips inconsistently across devices and MediaPipe versions.
 
 function checkQuizAnswer(hands, handedness) {
-  if (hands.length < 1) return false;
+  if (hands.length < 2) return false;
 
   const oi     = quizQueue[quizIndex];
-  const fi     = oi % 5;                    // 0=thumb … 4=pinky
+  const fi     = oi % 5;
   const tipId  = FINGERTIP_IDS[fi];
   const baseId = FINGER_BASE_IDS[fi];
   const W      = window.innerWidth;
   const H      = window.innerHeight;
 
-  // The quiz hint tells user: oi<5 → right hand, oi>=5 → left hand.
-  // After mirroring, "right hand on screen" wrist appears on the RIGHT
-  // half (screenX > 40% W). We use 40/60% margins to be generous.
   const targetOnRight = oi < 5;
 
   // ── Find the target hand ─────────────────────────────────────────
   let tHand = -1;
   for (let i = 0; i < hands.length; i++) {
     const lms = hands[i];
-    // Must have correct finger raised
     if (!isFingerUp(lms, tipId, baseId)) continue;
-    // Wrist (lm 0) screen-X after mirror: (1 - lm.x) * W
     const wristX = (1 - lms[0].x) * W;
     if (targetOnRight && wristX > W * 0.40) { tHand = i; break; }
     if (!targetOnRight && wristX < W * 0.60) { tHand = i; break; }
   }
-
-  // Fallback: if side-check found nothing, accept any hand with correct
-  // finger up (handles edge cases: extreme angles, user very centred)
   if (tHand === -1) {
     for (let i = 0; i < hands.length; i++) {
       if (isFingerUp(hands[i], tipId, baseId)) { tHand = i; break; }
@@ -195,38 +185,50 @@ function checkQuizAnswer(hands, handedness) {
   const tx   = (1 - tLms[tipId].x) * W;
   const ty   = tLms[tipId].y * H;
 
-  // Threshold: 11% of shortest screen dimension (~85px on a typical phone)
+  // Threshold for correct finger contact — generous (11%)
   const thr = Math.min(W, H) * 0.11;
 
-  // Landmarks to probe on the OTHER hand — covers fingertips, palm, knuckles
-  // i.e. all the points that realistically contact a finger when you hold it
+  // Landmarks to probe on the other hand for CORRECT finger detection
+  // (generous — fingertips + palm + knuckles, all points that contact a held finger)
   const PROBE = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20];
 
-  // ── Case 1: Two hands detected ───────────────────────────────────
-  if (hands.length >= 2) {
-    for (let i = 0; i < hands.length; i++) {
-      if (i === tHand) continue;
-      const hit = PROBE.some(id => {
-        const lm = hands[i][id];
-        if (!lm) return false;
-        return Math.hypot((1 - lm.x) * W - tx, lm.y * H - ty) < thr;
-      });
-      if (hit) return true;
-    }
-    return false;
+  // ── Find the other hand ──────────────────────────────────────────
+  let oHand = -1;
+  for (let i = 0; i < hands.length; i++) {
+    if (i !== tHand) { oHand = i; break; }
+  }
+  if (oHand === -1) return false;
+
+  // ── Step 1: Other hand must be touching the CORRECT fingertip ─────
+  const touching = PROBE.some(id => {
+    const lm = hands[oHand][id];
+    if (!lm) return false;
+    return Math.hypot((1 - lm.x) * W - tx, lm.y * H - ty) < thr;
+  });
+  if (!touching) return false;
+
+  // ── Step 2: CRITICAL: Reject only if another fingertip of the other hand
+  //    is deliberately near a WRONG fingertip of the target hand.
+  //    - wrongThr = 8%: tight enough to reject deliberate gripping of
+  //      a wrong finger, but loose enough that natural skin grazing of
+  //      an adjacent finger doesn't disqualify.
+  //    - Only check FINGERTIPS of the other hand (not palm/knuckles)
+  //      because palm contact near an adjacent fingertip is unavoidable
+  //      when holding any finger — fingertip-to-fingertip is deliberate.
+  const wrongThr = Math.min(W, H) * 0.08;
+  const WRONG_TIPS = FINGERTIP_IDS.filter(id => id !== tipId);
+  for (const wrongTipId of WRONG_TIPS) {
+    const wx = (1 - tLms[wrongTipId].x) * W;
+    const wy = tLms[wrongTipId].y * H;
+    const deliberateWrongHold = FINGERTIP_IDS.some(id => {
+      const lm = hands[oHand][id];
+      if (!lm) return false;
+      return Math.hypot((1 - lm.x) * W - wx, lm.y * H - wy) < wrongThr;
+    });
+    if (deliberateWrongHold) return false;
   }
 
-  // ── Case 2: Only 1 hand (overlap merged them) ────────────────────
-  // Need 2+ non-adjacent landmarks near the tip
-  const skip = new Set([tipId, tipId - 1, tipId - 2]);
-  let near = 0;
-  for (const id of PROBE) {
-    if (skip.has(id)) continue;
-    const lm = tLms[id];
-    if (!lm) continue;
-    if (Math.hypot((1 - lm.x) * W - tx, lm.y * H - ty) < thr) near++;
-  }
-  return near >= 2;
+  return true; // touching ONLY the correct finger ✅
 }
 
 // Wrap text helper — returns last Y used
@@ -252,7 +254,7 @@ function drawQuizPanel(ctx, W, H) {
 
   // ── COMPLETION ────────────────────────────────────────────────
   if (quizCompleted) {
-    const panH = 120;
+    const panH = 80;
     ctx.save();
     ctx.fillStyle='rgba(6,13,26,0.93)'; ctx.strokeStyle='#2ecc71'; ctx.lineWidth=1.8;
     ctx.shadowBlur=22; ctx.shadowColor='#2ecc71';
@@ -260,27 +262,8 @@ function drawQuizPanel(ctx, W, H) {
     ctx.textAlign='center'; ctx.textBaseline='alphabetic';
     ctx.fillStyle='#2ecc71'; ctx.font=`700 14px 'Segoe UI',sans-serif`;
     ctx.fillText('🎉  Brilliant! All 10 organelles identified!',W/2,panelY+28);
-
-    // Score Card
-    ctx.fillStyle='#ffffff';
-    ctx.font=`700 16px 'Segoe UI',sans-serif`;
-    ctx.fillText(`Score: ${score} / ${quizQueue.length}`, W/2, panelY+60);
-
-    // Score bar
-    const barW = panelW * 0.6;
-    const barX = W/2 - barW/2;
-    const barY = panelY + 75;
-    const barH = 8;
-
-    ctx.fillStyle='rgba(255,255,255,0.15)';
-    roundRect(ctx, barX, barY, barW, barH, 4);
-    ctx.fill();
-
-    ctx.fillStyle='#2ecc71';
-    roundRect(ctx, barX, barY, barW * (score/quizQueue.length), barH, 4);
-    ctx.fill();
     ctx.fillStyle='rgba(255,255,255,0.48)'; ctx.font=`500 11px 'Segoe UI',sans-serif`;
-    ctx.fillText("You're a Cell Biology expert!",W/2,panelY+100);
+    ctx.fillText("You're a Cell Biology expert!",W/2,panelY+50);
     ctx.restore();
     document.getElementById('playAgainBtn').classList.add('show');
     // Position button just below the completion panel
@@ -467,18 +450,17 @@ function render() {
       if (checkQuizAnswer(hands, handedness)) {
         touchFrameCount++;
         if (touchFrameCount >= TOUCH_FRAMES_NEEDED) {
-          quizAnswered = true;
-          quizShowCorrect = true;
-          quizCorrectTimer = 1.0;
-
-          score++;
-          playCorrectSound();
-
-          touchFrameCount = 0;
+          quizAnswered=true; quizShowCorrect=true; quizCorrectTimer=1.0;
+          touchFrameCount=0;
+          // Play correct answer chime
+          if (quizIndex + 1 >= quizQueue.length) {
+            playFanfare();   // last question — celebration sound
+          } else {
+            playChime();     // regular correct answer chime
+          }
         }
       } else {
-        touchFrameCount = 0;
-
+        touchFrameCount=0;
       }
     }
   } else {
@@ -503,22 +485,49 @@ function render() {
 function hexRgb(hex){return`${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)}`;}
 function roundRect(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();}
 
-// ─── SOUND SYSTEM ─────────────────────────────
+// ─── SOUNDS (Web Audio API — no files needed) ─────────────────────
 let audioCtx = null;
-
-function playCorrectSound() {
+function getAudio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const o = audioCtx.createOscillator();
-  const g = audioCtx.createGain();
-  o.type = 'sine';
-  o.frequency.value = 880;
-  g.gain.value = 0.1;
-  o.connect(g);
-  g.connect(audioCtx.destination);
-  o.start();
-  o.frequency.exponentialRampToValueAtTime(1320, audioCtx.currentTime + 0.15);
-  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
-  o.stop(audioCtx.currentTime + 0.2);
+  return audioCtx;
+}
+
+function playTone(freq, startTime, duration, volume, type, ac) {
+  const osc  = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(freq, startTime);
+  gain.gain.setValueAtTime(volume, startTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+  osc.start(startTime);
+  osc.stop(startTime + duration);
+}
+
+function playChime() {
+  try {
+    const ac = getAudio();
+    const t  = ac.currentTime;
+    // Pleasant ascending three-note chime: C5 → E5 → G5
+    playTone(523.25, t,        0.18, 0.35, 'sine', ac);
+    playTone(659.25, t + 0.12, 0.18, 0.30, 'sine', ac);
+    playTone(783.99, t + 0.24, 0.30, 0.25, 'sine', ac);
+  } catch(e) {}
+}
+
+function playFanfare() {
+  try {
+    const ac = getAudio();
+    const t  = ac.currentTime;
+    // Celebratory ascending fanfare: C5→E5→G5→C6
+    playTone(523.25, t,        0.15, 0.35, 'sine', ac);
+    playTone(659.25, t + 0.10, 0.15, 0.32, 'sine', ac);
+    playTone(783.99, t + 0.20, 0.15, 0.30, 'sine', ac);
+    playTone(1046.5, t + 0.30, 0.45, 0.28, 'sine', ac);
+    // harmony note
+    playTone(783.99, t + 0.30, 0.45, 0.15, 'sine', ac);
+  } catch(e) {}
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────
@@ -526,6 +535,8 @@ async function init() {
   loadText.textContent='Requesting camera access…';
   const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:1280,height:720},audio:false});
   video.srcObject=stream; await video.play();
+  // Pre-unlock AudioContext as early as possible
+  try { getAudio(); } catch(e) {}
 
   loadText.textContent='Loading MediaPipe AI…';
   const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
@@ -541,6 +552,8 @@ async function init() {
   initQuiz();
 
   document.getElementById('playAgainBtn').addEventListener('click', () => {
+    // Unlock audio context on user interaction if not already done
+    try { getAudio().resume(); } catch(e) {}
     initQuiz();
   });
 
