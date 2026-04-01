@@ -360,7 +360,7 @@ function drawQuizPanel(ctx, W, H) {
     wrapText(ctx,`💬 "${org.fact}"`,W/2,panelY+38,clueW,16);
 
     // Short hand hint — concise enough for narrow mobile screens
-    ctx.fillStyle='rgba(255,255,255,0.35)'; ctx.font=`500 10px 'Segoe UI',sans-serif`;
+    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font=`600 12px 'Segoe UI',sans-serif`;
     ctx.fillText(`${handEmoji} ${handName} hand · raise fingers to find it · hold with other hand`,
                   W/2, panelY+panH-13);
 
